@@ -1,11 +1,11 @@
 // IndexedDB 数据层：所有记录使用唯一 id 作为主键，不再依赖数组下标
-const NAME = 'pocket-ledger', VERSION = 1;
+const NAME = 'pocket-ledger', VERSION = 2;
 const KEYS = {
   bills: 'id', trash: 'id', accounts: 'id', categories: 'id', budgets: 'key',
-  templates: 'id', recurring: 'id', snapshots: 'id', meta: 'key',
+  templates: 'id', recurring: 'id', notes: 'id', snapshots: 'id', meta: 'key',
 };
 /** 属于“用户数据”的仓库（备份/快照/恢复的范围） */
-export const DATA_STORES = ['bills', 'accounts', 'categories', 'budgets', 'templates', 'recurring'];
+export const DATA_STORES = ['bills', 'accounts', 'categories', 'budgets', 'templates', 'recurring', 'notes'];
 export const bus = new EventTarget(); // 每次写入成功后触发 'saved'
 
 let dbp;

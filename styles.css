@@ -160,3 +160,19 @@ dialog.sheet::backdrop { background: rgba(0,0,0,.45); }
 .category-details[open] > summary::after { transform: rotate(180deg); }
 .category-details-list { padding-left: 4px; }
 @media (prefers-reduced-motion: reduce) { .bill-swipe-content, .category-details > summary::after { transition: none; } }
+
+
+/* v2.4：二级分类、备注快捷选择与自定义统计区间 */
+.category-tree { padding: 2px 0 8px; border-bottom: 1px solid var(--line); }
+.category-child { margin-left: 14px; padding-left: 10px; border-left: 2px solid var(--line); }
+.category-add-child { margin: 2px 0 4px 24px; color: var(--pri); font-size: .84rem; padding: 5px 8px; }
+.note-shortcut-wrap { display: flex; flex-direction: column; gap: 6px; }
+.note-shortcut-wrap .chips { flex-wrap: wrap; overflow: visible; }
+.note-shortcut-wrap .chip { max-width: 100%; white-space: normal; text-align: left; }
+.lg.sub { margin-left: 22px; color: var(--sub); font-size: .86rem; }
+.sub-bullet { width: 10px; color: var(--sub); flex: none; }
+.stat-range { display: flex; flex-direction: column; gap: 8px; padding: 12px; border-radius: 14px; background: var(--card); }
+.range-label { font-size: .82rem; }
+.stat-range-inputs { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.stat-range-actions { display: flex; gap: 8px; }
+.stat-range-actions .btn { flex: 1; }

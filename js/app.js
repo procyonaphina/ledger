@@ -7,7 +7,7 @@ import {
   daysIn, toLocalInput, fromLocalInput, validYmd, occurrence, csvCell, saveFile,
 } from './util.js';
 
-const VERSION = '2.3.0';
+const VERSION = '2.4.0';
 const ACC_TYPES = { cash: '现金', bank: '银行卡', alipay: '支付宝', wechat: '微信', credit: '信用卡', other: '其他' };
 const FREQ = { daily: '每天', weekly: '每周', monthly: '每月', yearly: '每年' };
 const TYPE_LABEL = { out: '支出', in: '收入', transfer: '转账' };
@@ -15,9 +15,9 @@ const WD = '日一二三四五六';
 const DAY = 864e5;
 
 const S = {
-  bills: [], trash: [], accounts: [], categories: [], budgets: {}, templates: [], recurring: [],
+  bills: [], trash: [], accounts: [], categories: [], budgets: {}, templates: [], recurring: [], notes: [],
   snapCount: 0, lastBackup: 0, persisted: false, savedAt: 0, useAccounts: false,
-  view: 'home', month: monthOf(Date.now()), year: new Date().getFullYear(), statTab: 'month', statKind: 'out',
+  view: 'home', month: monthOf(Date.now()), year: new Date().getFullYear(), statTab: 'month', statKind: 'out', statRange: null,
   filter: { type: 'all', cat: '', acc: '', q: '' }, limit: 100, selecting: false, picked: new Set(),
   accMap: new Map(), catMap: new Map(),
 };
@@ -33,7 +33,7 @@ async function load() {
   S.accounts = d.accounts.sort((a, b) => a.created - b.created);
   S.categories = d.categories.sort((a, b) => a.o - b.o || a.name.localeCompare(b.name));
   S.budgets = Object.fromEntries(d.budgets.map(x => [x.key, x.cents]));
-  S.templates = d.templates; S.recurring = d.recurring;
+  S.templates = d.templates; S.recurring = d.recurring; S.notes = (d.notes || []).sort((a, b) => b.created - a.created);
   S.trash = await db.getAll('trash');
   S.snapCount = await db.count('snapshots');
   S.lastBackup = (await db.getMeta('lastBackup')) || 0;
@@ -55,7 +55,12 @@ function sumBills(list) {
   let inc = 0, exp = 0; const byCat = {};
   for (const b of list) {
     if (b.type === 'in') inc += b.amount;
-    else if (b.type === 'out') { exp += b.amount; byCat[b.categoryId] = (byCat[b.categoryId] || 0) + b.amount; }
+    else if (b.type === 'out') {
+      exp += b.amount;
+      const c = S.catMap.get(b.categoryId), rootId = c?.parentId || c?.id || 'cat_other';
+      byCat[b.categoryId] = (byCat[b.categoryId] || 0) + b.amount;
+      if (rootId !== b.categoryId) byCat[rootId] = (byCat[rootId] || 0) + b.amount;
+    }
   }
   return { inc, exp, bal: inc - exp, byCat };
 }
@@ -80,6 +85,13 @@ function balances() {
   return m;
 }
 const catName = id => S.catMap.get(id)?.name || '未分类';
+const catLabel = id => {
+  const c = S.catMap.get(id);
+  return !c ? '未分类' : c.parentId ? `${catName(c.parentId)} · ${c.name}` : c.name;
+};
+const rootCategories = () => S.categories.filter(c => !c.parentId);
+const childrenOf = id => S.categories.filter(c => c.parentId === id);
+const categoryMatches = (id, filterId) => id === filterId || S.catMap.get(id)?.parentId === filterId;
 const accName = id => S.accMap.get(id)?.name || '已删除账户';
 /** 账户功能关闭时，新账单自动记到这个默认账户（用户不需要关心） */
 const defaultAcc = () => (S.accounts.find(a => !a.archived) || S.accounts[0])?.id || 'acc_cash';
@@ -197,7 +209,7 @@ const notice = (title, msg) => form(title, [], { message: msg, ok: '知道了', 
 const optMoney = v => { if (!v.trim()) return ''; const c = parseMoney(v); return c == null || c > MAX_CENTS ? '金额格式不对（最多两位小数）' : ''; };
 const reqMoney = v => { const c = parseMoney(v); return c == null ? '金额格式不对（最多两位小数）' : c < 1 ? '金额必须大于 0' : c > MAX_CENTS ? '金额过大' : ''; };
 const accOptions = (keep = []) => S.accounts.filter(a => !a.archived || keep.includes(a.id)).map(a => [a.id, a.name + (a.archived ? '（已停用）' : '')]);
-const catOptions = () => S.categories.map(c => [c.id, c.name]);
+const catOptions = () => rootCategories().flatMap(c => [[c.id, c.name], ...childrenOf(c.id).map(ch => [ch.id, `　└ ${ch.name}`])]);
 
 // =============== 小组件 ===============
 const dot = color => { const d = h('i', { class: 'dot' }); d.style.background = color; return d; };
@@ -226,7 +238,7 @@ function billRow(b, { swipeDelete = false } = {}) {
   const row = h('div', { class: 'bill' + (picked ? ' picked' : ''), role: 'button', tabindex: 0, onclick: act, onkeydown: e => { if (e.key === 'Enter') act(); } },
     S.selecting ? h('span', { class: 'chk' + (picked ? ' on' : ''), text: picked ? '✓' : '' }) : null,
     h('div', { class: 'b-main' },
-      h('div', { class: 'b-title tap', role: S.selecting ? null : 'button', tabindex: S.selecting ? null : 0, onclick: tapCat, onkeydown: keyOf(tapCat) }, b.type === 'transfer' ? '转账' : catName(b.categoryId), b.note ? h('span', { class: 'b-note', text: ' · ' + b.note }) : null, b.recurringId ? h('span', { class: 'b-note', text: ' 🔁' }) : null),
+      h('div', { class: 'b-title tap', role: S.selecting ? null : 'button', tabindex: S.selecting ? null : 0, onclick: tapCat, onkeydown: keyOf(tapCat) }, b.type === 'transfer' ? '转账' : catLabel(b.categoryId), b.note ? h('span', { class: 'b-note', text: ' · ' + b.note }) : null, b.recurringId ? h('span', { class: 'b-note', text: ' 🔁' }) : null),
       h('div', { class: 'b-sub', text: `${pad(d.getHours())}:${pad(d.getMinutes())}${sub ? ' · ' + sub : ''}` })),
     h('div', { class: 'amt tap ' + b.type, role: S.selecting ? null : 'button', tabindex: S.selecting ? null : 0, onclick: tapAmt, onkeydown: keyOf(tapAmt), text: (b.type === 'in' ? '+' : b.type === 'out' ? '-' : '') + fmt(b.amount) }));
   if (!swipeDelete || S.selecting) return row;
@@ -303,8 +315,8 @@ function vBills() {
   const filtered = () => {
     const q = f.q.trim().toLowerCase();
     return monthBills(S.month).filter(b => (f.type === 'all' || b.type === f.type)
-      && (!f.cat || b.categoryId === f.cat) && (!f.acc || b.accountId === f.acc || b.toAccountId === f.acc)
-      && (!q || (b.note || '').toLowerCase().includes(q) || catName(b.categoryId).toLowerCase().includes(q)));
+      && (!f.cat || categoryMatches(b.categoryId, f.cat)) && (!f.acc || b.accountId === f.acc || b.toAccountId === f.acc)
+      && (!q || (b.note || '').toLowerCase().includes(q) || catLabel(b.categoryId).toLowerCase().includes(q)));
   };
   function fill() {
     const list = filtered(), shown = list.slice(0, S.limit), kids = [];
@@ -365,14 +377,14 @@ function quickCategory(b) {
   if (b.type === 'transfer') return billForm(b);
   sheet('修改分类', close => h('div', { class: 'list' },
     h('p', { class: 'hint', text: `${fmt(b.amount)}${b.note ? ' · ' + b.note : ''}　点一个分类即可` }),
-    h('div', { class: 'catgrid' }, S.categories.map(c => h('button', {
-      type: 'button', class: 'btn' + (c.id === b.categoryId ? ' pri' : ''), text: c.name,
+    h('div', { class: 'catgrid' }, catOptions().map(([id, label]) => h('button', {
+      type: 'button', class: 'btn' + (id === b.categoryId ? ' pri' : ''), text: label.trim(),
       onclick: async () => {
         close();
-        if (c.id === b.categoryId) return;
+        if (id === b.categoryId) return;
         const cur = await db.get('bills', b.id); if (!cur) return;
-        await db.put('bills', { ...cur, categoryId: c.id });
-        await refresh(); toast(`分类已改为「${c.name}」`);
+        await db.put('bills', { ...cur, categoryId: id });
+        await refresh(); toast(`分类已改为「${catLabel(id)}」`);
       },
     }))),
     h('button', { type: 'button', class: 'btn block', text: '＋ 新增分类', onclick: async () => {
@@ -380,13 +392,13 @@ function quickCategory(b) {
       close();
       const cur = await db.get('bills', b.id); if (!cur) return;
       await db.put('bills', { ...cur, categoryId: id });
-      await refresh(); toast(`分类已改为「${catName(id)}」`);
+      await refresh(); toast(`分类已改为「${catLabel(id)}」`);
     } })));
 }
 async function quickAmount(b) {
   const v = await form('修改金额', [
     { key: 'amount', type: 'money', label: '金额', value: centsToStr(b.amount), required: true, validate: reqMoney },
-  ], { focus: 'amount', message: `${b.type === 'transfer' ? '转账' : catName(b.categoryId)}${b.note ? ' · ' + b.note : ''}` });
+  ], { focus: 'amount', message: `${b.type === 'transfer' ? '转账' : catLabel(b.categoryId)}${b.note ? ' · ' + b.note : ''}` });
   if (!v) return;
   const c = parseMoney(v.amount);
   if (c === b.amount) return;
@@ -431,22 +443,22 @@ async function billForm(b, preset = {}) {
     ok: '保存', focus: isNew ? 'amount' : null,
     message: restored ? '已恢复上次没保存完的草稿' : null,
     onInput: isNew ? saveDraft : null,
-    header: api => (isNew && S.templates.length ? h('div', { class: 'chips' }, S.templates.map(t => h('button', {
-      type: 'button', class: 'chip', text: `${t.name} ${fmt(t.amount)}`,
-      onclick: () => api.set({ type: t.type, amount: centsToStr(t.amount), categoryId: S.catMap.has(t.categoryId) ? t.categoryId : init.categoryId, accountId: S.accMap.has(t.accountId) ? t.accountId : init.accountId, note: t.note || '' }),
-    }))) : null),
-    actions: isNew
-      ? [{
-        text: '存为模板', run: async (vals, api) => {
-          const c = parseMoney(vals.amount);
-          if (vals.type === 'transfer' || c == null || c < 1) { api.error('模板需要有效金额，且不支持转账'); return; }
-          const r = await form('模板名称', [{ key: 'name', type: 'text', label: '名称', value: catName(vals.categoryId), required: true, max: 20 }]);
-          if (!r) return;
-          await db.put('templates', { id: uid(), name: r.name.trim(), type: vals.type, amount: c, categoryId: vals.categoryId, accountId: vals.accountId, note: vals.note.trim().slice(0, 200) });
-          await load(); api.say('已存为模板 ✓', true);
-        },
-      }]
-      : [{ text: '删除', danger: true, run: async (vals, api) => { api.close(null); await deleteBills([b.id]); } }],
+    header: api => S.notes.length ? h('div', { class: 'note-shortcut-wrap' },
+      h('small', { class: 'hint', text: '常用备注 · 点击即可填入' }),
+      h('div', { class: 'chips' }, S.notes.slice(0, 30).map(n => h('button', {
+        type: 'button', class: 'chip', text: n.text, onclick: () => api.set({ note: n.text }),
+      }))) : null,
+    actions: [
+      { text: '保存备注', run: async (vals, api) => {
+        const text = String(vals.note || '').trim();
+        if (!text) { api.error('请先填写要保存的备注'); return; }
+        if (S.notes.some(n => n.text === text)) { api.say('这条备注已经保存过了', true); return; }
+        if (S.notes.length >= 100) { api.error('常用备注最多保存 100 条'); return; }
+        const note = { id: uid(), text: text.slice(0, 200), created: Date.now() };
+        await db.put('notes', note); S.notes.unshift(note); api.say('备注已保存，下次可以直接点选 ✓', true);
+      } },
+      ...(!isNew ? [{ text: '删除', danger: true, run: async (vals, api) => { api.close(null); await deleteBills([b.id]); } }] : []),
+    ],
   });
   if (!v) return;
   const rec = {
@@ -469,18 +481,55 @@ function vStats() {
   return root;
 }
 const legend = items => h('div', { class: 'legend' }, items);
-function ranking(byCat, total) {
-  const items = Object.entries(byCat).sort((a, b) => b[1] - a[1]).map(([id, v], i) => ({ label: catName(id), value: v, color: PALETTE[i % PALETTE.length] }));
-  return { items, total, rows: items.map(it => h('div', { class: 'lg' }, dot(it.color), h('span', { class: 'grow', text: it.label }), h('span', { text: fmt(it.value) }), h('span', { class: 'hint pct', text: total ? (it.value / total * 100).toFixed(1) + '%' : '' }))) };
+function ranking(bills, total) {
+  const parentTotals = new Map(), childTotals = new Map(), directTotals = new Map();
+  for (const b of bills) {
+    const c = S.catMap.get(b.categoryId), rootId = c?.parentId || c?.id || 'cat_other';
+    parentTotals.set(rootId, (parentTotals.get(rootId) || 0) + b.amount);
+    if (c?.parentId) childTotals.set(c.id, (childTotals.get(c.id) || 0) + b.amount);
+    else directTotals.set(rootId, (directTotals.get(rootId) || 0) + b.amount);
+  }
+  const ordered = rootCategories().filter(c => parentTotals.has(c.id)).sort((a, b) => parentTotals.get(b.id) - parentTotals.get(a.id));
+  const items = ordered.map((c, i) => ({ label: c.name, value: parentTotals.get(c.id), color: PALETTE[i % PALETTE.length] }));
+  const rows = [];
+  for (const [i, c] of ordered.entries()) {
+    const value = parentTotals.get(c.id);
+    rows.push(h('div', { class: 'lg' }, dot(PALETTE[i % PALETTE.length]), h('span', { class: 'grow', text: c.name }), h('b', { text: fmt(value) }), h('span', { class: 'hint pct', text: total ? (value / total * 100).toFixed(1) + '%' : '' })));
+    const allChildren = childrenOf(c.id);
+    const children = allChildren.filter(ch => childTotals.has(ch.id)).sort((a, b) => childTotals.get(b.id) - childTotals.get(a.id));
+    if (allChildren.length && (directTotals.get(c.id) || 0) > 0) {
+      const v = directTotals.get(c.id);
+      rows.push(h('div', { class: 'lg sub' }, h('span', { class: 'sub-bullet', text: '↳' }), h('span', { class: 'grow', text: '未细分' }), h('span', { text: fmt(v) }), h('span', { class: 'hint pct', text: total ? (v / total * 100).toFixed(1) + '%' : '' })));
+    }
+    children.forEach(ch => {
+      const v = childTotals.get(ch.id);
+      rows.push(h('div', { class: 'lg sub' }, h('span', { class: 'sub-bullet', text: '↳' }), h('span', { class: 'grow', text: ch.name }), h('span', { text: fmt(v) }), h('span', { class: 'hint pct', text: total ? (v / total * 100).toFixed(1) + '%' : '' })));
+    });
+  }
+  return { items, total, rows };
 }
 function statMonth(root) {
-  root.append(monthNav(S.month, m => { S.month = m; render(); }));
+  root.append(monthNav(S.month, m => { S.month = m; S.statRange = null; render(); }));
+  const from = h('input', { type: 'date', value: S.statRange?.from || `${S.month}-01`, 'aria-label': '开始日期' });
+  const to = h('input', { type: 'date', value: S.statRange?.to || `${S.month}-${pad(daysIn(S.month))}`, 'aria-label': '结束日期' });
+  root.append(h('div', { class: 'stat-range' },
+    h('span', { class: 'hint range-label', text: S.statRange ? `${S.statRange.from} 至 ${S.statRange.to}` : '也可以选择任意时间段' }),
+    h('div', { class: 'stat-range-inputs' }, from, to),
+    h('div', { class: 'stat-range-actions' },
+      h('button', { type: 'button', class: 'btn sm pri', text: '统计这段时间', onclick: () => {
+        if (!validYmd(from.value) || !validYmd(to.value) || from.value > to.value) { toast('请选择正确的起止日期'); return; }
+        S.statRange = { from: from.value, to: to.value }; render();
+      } }),
+      h('button', { type: 'button', class: 'btn sm', text: '恢复本月', onclick: () => { S.statRange = null; render(); } }))));
   root.append(h('div', { class: 'seg' }, [['out', '支出'], ['in', '收入']].map(([v, t]) => h('button', { type: 'button', class: 'seg-b' + (S.statKind === v ? ' on' : ''), text: t, onclick: () => { S.statKind = v; render(); } }))));
-  const by = {}; let total = 0;
-  monthBills(S.month).filter(b => b.type === S.statKind).forEach(b => { by[b.categoryId] = (by[b.categoryId] || 0) + b.amount; total += b.amount; });
-  const r = ranking(by, total), cv = h('canvas', { class: 'chart sq' });
+  const list = (S.statRange
+    ? S.bills.filter(b => b.time >= new Date(`${S.statRange.from}T00:00:00`).getTime() && b.time <= new Date(`${S.statRange.to}T23:59:59.999`).getTime())
+    : monthBills(S.month)).filter(b => b.type === S.statKind);
+  const total = list.reduce((sum, b) => sum + b.amount, 0);
+  const r = ranking(list, total), cv = h('canvas', { class: 'chart sq' });
   post.push(() => donut(cv, r.items, { title: S.statKind === 'out' ? '支出' : '收入', total: fmt(total) }));
-  root.append(h('section', { class: 'card' }, cv, legend(r.rows)));
+  root.append(h('section', { class: 'card' }, h('h3', { text: `${S.statKind === 'out' ? '支出' : '收入'}分类明细` }), cv,
+    r.rows.length ? legend(r.rows) : h('p', { class: 'hint center', text: '这段时间还没有记录' })));
 }
 function statTrend(root) {
   root.append(monthNav(S.month, m => { S.month = m; render(); }));
@@ -511,8 +560,8 @@ function statYear(root) {
   post.push(() => cartesian(cv, rows.map(r => String(r.m)), [{ color: '#10b981', values: rows.map(r => r.inc) }, { color: '#ef4444', values: rows.map(r => r.exp) }], 'bars'));
   root.append(h('section', { class: 'card' }, h('h3', { text: '各月收支' }), cv,
     h('div', { class: 'srow2' }, h('span', { text: `月均支出 ${fmt(Math.round(exp / span))}` }), h('span', { text: top.exp ? `支出最高 ${top.m} 月 ${fmt(top.exp)}` : '' }))));
-  const by = {}; S.bills.filter(b => b.type === 'out' && new Date(b.time).getFullYear() === y).forEach(b => { by[b.categoryId] = (by[b.categoryId] || 0) + b.amount; });
-  const r = ranking(by, exp), cv2 = h('canvas', { class: 'chart sq' });
+  const yearOutBills = S.bills.filter(b => b.type === 'out' && new Date(b.time).getFullYear() === y);
+  const r = ranking(yearOutBills, exp), cv2 = h('canvas', { class: 'chart sq' });
   post.push(() => donut(cv2, r.items, { title: '年支出', total: fmt(exp) }));
   root.append(h('section', { class: 'card' }, h('h3', { text: '年度支出构成' }), cv2, legend(r.rows)));
   root.append(h('section', { class: 'card' }, h('h3', { text: '月度明细' }),
@@ -572,14 +621,15 @@ function vMore() {
     h('details', { class: 'category-details' },
       h('summary', { text: `分类管理（${S.categories.length}）` }),
       h('div', { class: 'category-details-list' },
-        S.categories.map(c => row(c.name, S.budgets[c.id] ? '预算 ' + fmt(S.budgets[c.id]) : '', () => catForm(c))),
-        row('＋ 新增分类', '', () => catForm(null)))));
+        rootCategories().map(c => h('div', { class: 'category-tree' },
+          row(c.name, S.budgets[c.id] ? '预算 ' + fmt(S.budgets[c.id]) : '一级分类', () => catForm(c)),
+          ...childrenOf(c.id).map(ch => h('div', { class: 'category-child' }, row('↳ ' + ch.name, S.budgets[ch.id] ? '预算 ' + fmt(S.budgets[ch.id]) : '二级分类', () => catForm(ch)))),
+          h('button', { type: 'button', class: 'category-add-child', text: '＋ 添加二级分类', onclick: () => catForm(null, c.id) }))),
+        row('＋ 新增一级分类', '', () => catForm(null)))));
   sec('周期账单',
-    S.recurring.map(r => row(`${r.type === 'in' ? '+' : '-'}${fmt(r.amount)} · ${catName(r.categoryId)}`, `${FREQ[r.freq]} · 从 ${r.start}${r.end ? ' 到 ' + r.end : ''}${r.active ? '' : ' · 已暂停'}`, () => recurringForm(r))),
+    S.recurring.map(r => row(`${r.type === 'in' ? '+' : '-'}${fmt(r.amount)} · ${catLabel(r.categoryId)}`, `${FREQ[r.freq]} · 从 ${r.start}${r.end ? ' 到 ' + r.end : ''}${r.active ? '' : ' · 已暂停'}`, () => recurringForm(r))),
     row('＋ 新增周期账单', '工资、房租、订阅等，打开应用时自动入账', () => recurringForm(null)));
-  sec('快捷模板',
-    S.templates.map(t => row(t.name, `${TYPE_LABEL[t.type]} ${fmt(t.amount)}`, () => templateForm(t))),
-    h('p', { class: 'hint', text: '在「记一笔」里填好后点「存为模板」即可添加。' }));
+  sec('常用备注', row('管理已保存的备注', `${S.notes.length} 条 · 记账时可直接点选`, notesSheet));
   sec('数据与安全',
     h('p', { class: 'hint', text: '所有改动实时写入本机数据库，无需手动保存；每天首次打开会自动创建快照。' }),
     row('导出备份', '含校验码，可加密', exportDialog),
@@ -607,59 +657,79 @@ async function totalBudgetForm() {
   if (c) await db.put('budgets', { key: '_total', cents: c }); else await db.del('budgets', '_total');
   await refresh();
 }
-async function addCategoryQuick() {
-  const v = await form('新增分类', [{
-    key: 'name', type: 'text', label: '分类名称', value: '', required: true, max: 30,
-    validate: value => S.categories.some(c => c.name.trim().toLowerCase() === value.trim().toLowerCase()) ? '这个分类已经存在' : '',
-  }]);
+async function addCategoryQuick(defaultParentId = '') {
+  const roots = rootCategories();
+  const v = await form('新增分类', [
+    { key: 'parentId', type: 'select', label: '上级分类', value: defaultParentId || '', options: [['', '不选择（新增一级分类）'], ...roots.map(c => [c.id, c.name])] },
+    { key: 'name', type: 'text', label: '分类名称', value: '', required: true, max: 30,
+      validate: (value, vals) => S.categories.some(c => c.parentId === (vals.parentId || '') && c.name.trim().toLowerCase() === value.trim().toLowerCase()) ? '同一上级分类下已经有这个名称' : '' },
+  ]);
   if (!v) return null;
-  const name = v.name.trim();
-  const id = uid();
-  await db.put('categories', { id, name, o: Date.now() });
+  const name = v.name.trim(), id = uid(), parentId = v.parentId || '';
+  if (parentId && !rootCategories().some(c => c.id === parentId)) { await notice('新增失败', '上级分类无效，请重新选择'); return null; }
+  await db.put('categories', { id, name, o: Date.now(), ...(parentId ? { parentId } : {}) });
   await load();
-  toast(`已新增分类「${name}」`);
+  toast(`已新增${parentId ? '二级' : '一级'}分类「${catLabel(id)}」`);
   return id;
 }
 
-async function catForm(c) {
-  const isNew = !c;
+async function catForm(c, defaultParentId = '') {
+  const isNew = !c, hasChildren = !!c && childrenOf(c.id).length > 0;
+  const parentOptions = [['', '一级分类（无上级）'], ...rootCategories().filter(x => x.id !== c?.id).map(x => [x.id, x.name])];
   const v = await form(isNew ? '新增分类' : '编辑分类', [
-    { key: 'name', type: 'text', label: '名称', value: c?.name, required: true, max: 30 },
+    { key: 'parentId', type: 'select', label: '上级分类', value: c?.parentId || defaultParentId || '', options: parentOptions, disabled: hasChildren || c?.id === 'cat_other' },
+    { key: 'name', type: 'text', label: '名称', value: c?.name, required: true, max: 30,
+      validate: (value, vals) => S.categories.some(x => x.id !== c?.id && x.parentId === (vals.parentId || '') && x.name.trim().toLowerCase() === value.trim().toLowerCase()) ? '同一上级分类下已经有这个名称' : '' },
     { key: 'budget', type: 'money', label: '月度预算（可选）', value: c && S.budgets[c.id] ? centsToStr(S.budgets[c.id]) : '', placeholder: '不设置请留空', validate: optMoney },
   ], {
+    message: hasChildren ? '这是一级分类且下面已有二级分类，因此不能将它移动到其他分类下面。' : '上级分类留空表示一级分类；选择一个上级分类即可创建或调整为二级分类。',
     actions: isNew ? [] : [
-      { text: '合并到…', run: async (vals, api) => { api.close(null); await mergeDialog(c); } },
+      { text: '合并到…', run: async (vals, api) => {
+        if (hasChildren) { api.error('请先处理该分类下的二级分类，再合并一级分类'); return; }
+        api.close(null); await mergeDialog(c);
+      } },
       ...(c.id !== 'cat_other' ? [{
         text: '删除', danger: true, run: async (vals, api) => {
-          if (!await confirmBox(`删除「${c.name}」？该分类下的账单会归入「其他」。`, '删除', true)) return;
-          await bk.takeSnapshot('删除分类前'); await db.remapCategory(c.id, 'cat_other', true); api.close(null); await refresh();
+          if (hasChildren) { api.error('请先逐个删除或移动下面的二级分类'); return; }
+          const target = c.parentId || 'cat_other';
+          if (!await confirmBox(`删除「${catLabel(c.id)}」？该分类下的账单会归入「${catLabel(target)}」。`, '删除', true)) return;
+          await bk.takeSnapshot('删除分类前'); await db.remapCategory(c.id, target, true); api.close(null); await refresh();
         },
       }] : []),
     ],
   });
   if (!v) return;
-  const id = c?.id || uid(), cents = v.budget.trim() ? parseMoney(v.budget) : 0;
+  const id = c?.id || uid(), cents = v.budget.trim() ? parseMoney(v.budget) : 0, parentId = v.parentId || '';
+  if (parentId && !rootCategories().some(x => x.id === parentId)) { await notice('保存失败', '二级分类的上级必须是一级分类'); return; }
+  if (hasChildren && parentId) { await notice('保存失败', '有二级分类的一级分类不能再移动到其他分类下面'); return; }
+  const rec = { id, name: v.name.trim(), o: c?.o ?? Date.now(), ...(parentId ? { parentId } : {}) };
   await db.tx(['categories', 'budgets'], (ct, bd) => {
-    ct.put({ id, name: v.name.trim(), o: c?.o ?? Date.now() });
+    ct.put(rec);
     if (cents) bd.put({ key: id, cents }); else bd.delete(id);
   });
   await refresh();
 }
 async function mergeDialog(c) {
-  const others = S.categories.filter(x => x.id !== c.id);
+  if (childrenOf(c.id).length) { await notice('不能合并', '请先处理该一级分类下的二级分类。'); return; }
+  const others = rootCategories().filter(x => x.id !== c.id);
   if (!others.length) return;
-  const v = await form(`合并「${c.name}」`, [{ key: 'to', type: 'select', label: '合并到', options: others.map(x => [x.id, x.name]), value: others[0].id }],
-    { message: '该分类的账单、模板、周期规则都会归入目标分类，然后删除本分类。', ok: '合并', danger: true });
+  const defaultTarget = c.parentId && others.some(x => x.id === c.parentId) ? c.parentId : others[0].id;
+  const v = await form(`合并「${catLabel(c.id)}」`, [{ key: 'to', type: 'select', label: '合并到', options: others.map(x => [x.id, x.name]), value: defaultTarget }],
+    { message: '该分类下的账单、周期规则和预算会合并到目标一级分类。', ok: '合并', danger: true });
   if (!v) return;
   if (c.id === 'cat_other') { await notice('不能合并', '「其他」是兜底分类，不能被合并掉。'); return; }
   await bk.takeSnapshot('合并分类前'); await db.remapCategory(c.id, v.to, true); await refresh(); toast('已合并');
 }
-async function templateForm(t) {
-  const v = await form('编辑模板', [{ key: 'name', type: 'text', label: '名称', value: t.name, required: true, max: 20 }],
-    { actions: [{ text: '删除', danger: true, run: async (vals, api) => { await db.del('templates', t.id); api.close(null); await refresh(); } }] });
-  if (!v) return;
-  await db.put('templates', { ...t, name: v.name.trim() }); await refresh();
+function notesSheet() {
+  sheet('常用备注', close => h('div', { class: 'list' },
+    h('p', { class: 'hint', text: '在记账页面点击备注标签即可填入；保存备注只会保存文字，不会保存金额或分类。' }),
+    S.notes.length ? S.notes.map(n => h('div', { class: 'srow' },
+      h('div', { class: 'grow' }, h('b', { text: n.text }), h('small', { text: '常用备注' })),
+      h('button', { type: 'button', class: 'btn sm danger', text: '删除', onclick: async () => {
+        await db.del('notes', n.id); S.notes = S.notes.filter(x => x.id !== n.id); close(); await refresh(); notesSheet();
+      } }))) : h('p', { class: 'hint center', text: '还没有保存过备注。记账时填写备注，再点「保存备注」即可。' })));
 }
+
 async function recurringForm(r) {
   const isNew = !r, locked = !!r && r.n > 0, today = ymd(new Date());
   const accs = accOptions(r ? [r.accountId] : []);
@@ -787,7 +857,7 @@ function trashSheet() {
   const items = S.trash.slice().sort((a, b) => b.deletedAt - a.deletedAt);
   sheet('回收站', close => h('div', { class: 'list' },
     items.length ? items.map(b => h('div', { class: 'srow' },
-      h('div', { class: 'grow' }, h('b', { text: `${b.type === 'transfer' ? '转账' : catName(b.categoryId)} ${fmt(b.amount)}${b.note ? ' · ' + b.note : ''}` }), h('small', { text: `账单时间 ${fmtTime(b.time)}` })),
+      h('div', { class: 'grow' }, h('b', { text: `${b.type === 'transfer' ? '转账' : catLabel(b.categoryId)} ${fmt(b.amount)}${b.note ? ' · ' + b.note : ''}` }), h('small', { text: `账单时间 ${fmtTime(b.time)}` })),
       h('button', { type: 'button', class: 'btn sm', text: '恢复', onclick: async () => { await undelete([b.id]); close(); trashSheet(); } })))
       : h('p', { class: 'hint center', text: '回收站是空的' }),
     items.length ? h('button', { type: 'button', class: 'btn danger block', text: '清空回收站', onclick: async () => { if (await confirmBox('永久删除回收站里的全部账单？', '清空', true)) { await db.clearStore('trash'); close(); await refresh(); } } }) : null));
@@ -795,7 +865,7 @@ function trashSheet() {
 
 async function clearAll() {
   const v = await form('清空全部数据', [{ key: 'w', type: 'text', label: '输入「清空」确认', validate: x => (x.trim() === '清空' ? '' : '请输入：清空') }],
-    { message: '账单、账户、分类、预算、模板、周期规则都会被清除（会先创建快照，可在历史快照里恢复）。', ok: '清空', danger: true });
+    { message: '账单、账户、分类、预算、常用备注和周期规则都会被清除（会先创建快照，可在历史快照里恢复）。', ok: '清空', danger: true });
   if (!v) return;
   await bk.takeSnapshot('清空前自动备份', false);
   await db.replaceAll(bk.defaultData()); await db.clearStore('trash');
@@ -810,13 +880,28 @@ function csvSheet() {
   const mk = async (kind) => {
     const A = S.useAccounts || S.bills.some(x => x.type === 'transfer');
     const head = ['日期', '类型', '分类', ...(A ? ['账户', '转入账户'] : []), '金额', '备注'];
-    const line = b => { const d = new Date(b.time); return [`${ymd(d)} ${pad(d.getHours())}:${pad(d.getMinutes())}`, TYPE_LABEL[b.type], b.type === 'transfer' ? '' : catName(b.categoryId), ...(A ? [accName(b.accountId), b.type === 'transfer' ? accName(b.toAccountId) : ''] : []), centsToStr(b.amount), b.note || '']; };
+    const line = b => { const d = new Date(b.time); return [`${ymd(d)} ${pad(d.getHours())}:${pad(d.getMinutes())}`, TYPE_LABEL[b.type], b.type === 'transfer' ? '' : catLabel(b.categoryId), ...(A ? [accName(b.accountId), b.type === 'transfer' ? accName(b.toAccountId) : ''] : []), centsToStr(b.amount), b.note || '']; };
     let rows, name;
     if (kind === 'month') { rows = [head, ...monthBills(S.month).reverse().map(line)]; name = `bills-${S.month}`; }
     else if (kind === 'all') { rows = [head, ...[...S.bills].reverse().map(line)]; name = `bills-all-${ymd(new Date())}`; }
     else if (kind === 'summary') {
       const s = sumBills(monthBills(S.month));
-      rows = [['分类', '支出', '占比'], ...Object.entries(s.byCat).sort((a, b) => b[1] - a[1]).map(([id, v]) => [catName(id), centsToStr(v), (v / s.exp * 100).toFixed(2) + '%']), ['合计', centsToStr(s.exp), '100%']];
+      const detail = [];
+      for (const parent of rootCategories()) {
+        const parentTotal = s.byCat[parent.id] || 0;
+        if (!parentTotal) continue;
+        detail.push([parent.name, '', centsToStr(parentTotal), (parentTotal / s.exp * 100).toFixed(2) + '%']);
+        const kids = childrenOf(parent.id);
+        if (kids.length) {
+          const direct = (monthBills(S.month).filter(b => b.categoryId === parent.id && b.type === 'out').reduce((a, b) => a + b.amount, 0));
+          if (direct) detail.push([parent.name, '未细分', centsToStr(direct), (direct / s.exp * 100).toFixed(2) + '%']);
+          for (const child of kids) {
+            const value = s.byCat[child.id] || 0;
+            if (value) detail.push([parent.name, child.name, centsToStr(value), (value / s.exp * 100).toFixed(2) + '%']);
+          }
+        }
+      }
+      rows = [['一级分类', '二级分类', '支出', '占比'], ...detail, ['合计', '', centsToStr(s.exp), '100%']];
       name = `category-summary-${S.month}`;
     } else {
       const tot = monthTotals();
@@ -858,6 +943,22 @@ function paintStatus() {
   $('#status').textContent = (navigator.onLine ? '' : '离线 · ') + (t ? `已保存 ${pad(t.getHours())}:${pad(t.getMinutes())}` : '数据已就绪');
 }
 
+/** 首次升级时，把旧整笔模板里填写过的备注提取为常用备注；原模板数据保留在备份中。 */
+async function migrateTemplateNotes() {
+  if (await db.getMeta('templateNotesMigrated')) return;
+  const [oldTemplates, saved] = await Promise.all([db.getAll('templates'), db.getAll('notes')]);
+  const seen = new Set(saved.map(x => x.text));
+  const additions = [];
+  for (const t of oldTemplates) {
+    const text = String(t.note || '').trim();
+    if (text && !seen.has(text) && additions.length < 100) {
+      seen.add(text); additions.push({ id: uid(), text: text.slice(0, 200), created: Date.now() });
+    }
+  }
+  if (additions.length) await db.putMany('notes', additions);
+  await db.setMeta('templateNotesMigrated', true);
+}
+
 async function seed() {
   if (await db.getMeta('seeded')) return;
   let migrated = 0;
@@ -896,8 +997,7 @@ async function checkUpdate(manual) {
     } else if (manual) toast(`已是最新版本 v${VERSION}`);
   } catch { if (manual) toast('检查失败：连不上服务器，请检查网络后重试', { ms: 5000 }); }
 }
-/** 新版本接管后刷新页面。正在填写表单（有弹窗）时不打断：弹窗里放一条提示，关闭弹窗后自动刷新 */
-let dlgWatch = null;
+/** 新版本接管后刷新页面。正在填写表单（有弹窗）时不打断：弹窗里放一条提示，关闭弹窗后自动刷新 */let dlgWatch = null;
 function applyUpdate() {
   if (reloading) return;
   const dlg = document.querySelector('dialog[open]');
@@ -915,6 +1015,7 @@ async function init() {
   try { await db.open(); }
   catch (e) { $('#view').replaceChildren(h('div', { class: 'page' }, h('section', { class: 'card' }, h('h3', { text: '无法打开本地数据库' }), h('p', { class: 'hint', text: '可能是浏览器的隐私/无痕模式，或存储被禁用。请用正常模式的 Safari 打开。' + (e?.message ? `（${e.message}）` : '') })))); return; }
   await seed();
+  await migrateTemplateNotes();
   await db.purgeTrash(30 * DAY);
   await bk.dailySnapshot();
   await load();

@@ -8,7 +8,7 @@ const ITER = 600000;
 const MAX_AUTO_SNAPSHOTS = 20;
 const ACC_TYPES = ['cash', 'bank', 'alipay', 'wechat', 'credit', 'other'];
 const FREQS = ['daily', 'weekly', 'monthly', 'yearly'];
-const LIM = { bills: 200000, accounts: 200, categories: 500, budgets: 600, templates: 200, recurring: 200 };
+const LIM = { bills: 200000, accounts: 200, categories: 500, budgets: 600, templates: 200, recurring: 200, notes: 100 };
 
 const enc = new TextEncoder(), dec = new TextDecoder();
 const AAD = enc.encode('pocket-ledger/v2');
@@ -122,9 +122,13 @@ export function validateData(raw) {
   const categories = list('categories').flatMap((c, i) => {
     if (!obj(c) || !str(c.id, 64, 1) || !str(c.name, 30, 1)) { bad(`分类 #${i + 1} 无效`); return []; }
     if (!uniq('category', c.id)) return [];
-    return [{ id: c.id, name: c.name, o: Number.isFinite(c.o) ? c.o : 0 }];
+    return [{ id: c.id, name: c.name, o: Number.isFinite(c.o) ? c.o : 0, ...(typeof c.parentId === 'string' && c.parentId ? { parentId: c.parentId } : {}) }];
   });
   if (!categories.some(c => c.id === 'cat_other')) categories.push({ id: 'cat_other', name: '其他', o: 9999 });
+  const categoryMap = new Map(categories.map(c => [c.id, c]));
+  for (const c of categories) {
+    if (c.parentId && (c.parentId === c.id || !categoryMap.has(c.parentId) || categoryMap.get(c.parentId).parentId)) bad(`分类「${c.name}」的上级无效（最多支持两级）`);
+  }
   const accIds = new Set(accounts.map(a => a.id)), catIds = new Set(categories.map(c => c.id));
 
   const bills = list('bills').flatMap((b, i) => {
@@ -151,17 +155,21 @@ export function validateData(raw) {
       || !FREQS.includes(r.freq) || !validYmd(r.start) || !(r.end === '' || validYmd(r.end)) || !Number.isSafeInteger(r.n) || r.n < 0 || r.n > 1e6 || !str(r.note ?? '', 200)) { bad(`周期规则 #${i + 1} 无效`); return []; }
     return uniq('recurring', r.id) ? [{ id: r.id, type: r.type, amount: r.amount, categoryId: r.categoryId, accountId: r.accountId, note: r.note ?? '', freq: r.freq, start: r.start, end: r.end, n: r.n, active: r.active !== false }] : [];
   });
+  const notes = list('notes').flatMap((n, i) => {
+    if (!obj(n) || !str(n.id, 64, 1) || !str(n.text, 200, 1)) { bad(`常用备注 #${i + 1} 无效`); return []; }
+    return uniq('note', n.id) ? [{ id: n.id, text: n.text, created: Number.isFinite(n.created) ? n.created : 0 }] : [];
+  });
   if (errs.length) throw new Error('校验失败：' + errs.join('；') + (errs.length >= 8 ? '…' : ''));
   if (!accounts.length) throw new Error('校验失败：至少需要一个账户');
-  return { bills, accounts, categories, budgets, templates, recurring };
+  return { bills, accounts, categories, budgets, templates, recurring, notes };
 }
 
-export const countsOf = d => ({ bills: d.bills.length, accounts: d.accounts.length, categories: d.categories.length, templates: d.templates.length, recurring: d.recurring.length });
+export const countsOf = d => ({ bills: d.bills.length, accounts: d.accounts.length, categories: d.categories.length, templates: d.templates.length, recurring: d.recurring.length, notes: (d.notes || []).length });
 
 export function defaultData() {
   const cats = [['cat_food', '餐饮'], ['cat_traffic', '交通'], ['cat_shop', '购物'], ['cat_med', '医疗'], ['cat_study', '学习'], ['cat_salary', '工资'], ['cat_other', '其他']];
   return {
-    bills: [], budgets: [], templates: [], recurring: [],
+    bills: [], budgets: [], templates: [], recurring: [], notes: [],
     accounts: [{ id: 'acc_cash', name: '现金', type: 'cash', initial: 0, archived: false, created: Date.now() }],
     categories: cats.map(([id, name], i) => ({ id, name, o: i + 1 })),
   };
@@ -190,7 +198,7 @@ export function fromLegacy(old) {
     id: uid(), name: String(t?.name || '模板').slice(0, 30), type: t?.type === 'in' ? 'in' : 'out', amount: cents(t?.amount),
     categoryId: cat(t?.category), accountId: acc.id, note: String(t?.note || '').slice(0, 200),
   })).filter(t => t.amount > 0 && t.amount <= MAX_CENTS);
-  return { data: { bills, accounts: [acc], categories, budgets, templates, recurring: [] }, dropped: src.length - bills.length };
+  return { data: { bills, accounts: [acc], categories, budgets, templates, recurring: [], notes: [] }, dropped: src.length - bills.length };
 }
 
 // ---------- 备份文件 ----------
