@@ -142,3 +142,21 @@ dialog.sheet::backdrop { background: rgba(0,0,0,.45); }
 .b-title.tap { padding: 6px 0 2px; }
 .amt.tap { padding: 12px 6px; margin: -12px -6px; }
 .b-title.tap:active, .amt.tap:active { opacity: .55; }
+
+
+/* v2.3：账单左滑删除、分类快捷新增与折叠管理 */
+.bill-swipe { position: relative; width: 100%; overflow: hidden; touch-action: pan-y; background: var(--out); }
+.bill-swipe-content { position: relative; z-index: 1; background: var(--card); transition: transform .18s ease; will-change: transform; }
+.bill-swipe-content.open { transform: translateX(76px); }
+.bill-delete { position: absolute; top: 0; left: 0; bottom: 0; width: 76px; display: flex; align-items: center; justify-content: center; background: var(--out); color: #fff; font-weight: 600; }
+.bill-delete:active { filter: brightness(.9); }
+.select-add { display: flex; align-items: center; gap: 8px; }
+.select-add select { flex: 1; min-width: 0; }
+.select-add .btn { flex: none; white-space: nowrap; padding: 9px 10px; }
+.category-details { border-top: 1px solid var(--line); padding-top: 10px; }
+.category-details > summary { cursor: pointer; list-style: none; display: flex; align-items: center; justify-content: space-between; padding: 8px 2px; color: var(--sub); font-size: .9rem; }
+.category-details > summary::-webkit-details-marker { display: none; }
+.category-details > summary::after { content: '⌄'; font-size: 1.1rem; transition: transform .18s ease; }
+.category-details[open] > summary::after { transform: rotate(180deg); }
+.category-details-list { padding-left: 4px; }
+@media (prefers-reduced-motion: reduce) { .bill-swipe-content, .category-details > summary::after { transition: none; } }
