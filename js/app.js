@@ -7,7 +7,7 @@ import {
   daysIn, toLocalInput, fromLocalInput, validYmd, occurrence, csvCell, saveFile,
 } from './util.js';
 
-const VERSION = '2.0.1';
+const VERSION = '2.2.0';
 const ACC_TYPES = { cash: '现金', bank: '银行卡', alipay: '支付宝', wechat: '微信', credit: '信用卡', other: '其他' };
 const FREQ = { daily: '每天', weekly: '每周', monthly: '每月', yearly: '每年' };
 const TYPE_LABEL = { out: '支出', in: '收入', transfer: '转账' };
@@ -16,7 +16,7 @@ const DAY = 864e5;
 
 const S = {
   bills: [], trash: [], accounts: [], categories: [], budgets: {}, templates: [], recurring: [],
-  snapCount: 0, lastBackup: 0, persisted: false, savedAt: 0,
+  snapCount: 0, lastBackup: 0, persisted: false, savedAt: 0, useAccounts: false,
   view: 'home', month: monthOf(Date.now()), year: new Date().getFullYear(), statTab: 'month', statKind: 'out',
   filter: { type: 'all', cat: '', acc: '', q: '' }, limit: 100, selecting: false, picked: new Set(),
   accMap: new Map(), catMap: new Map(),
@@ -38,6 +38,13 @@ async function load() {
   S.lastBackup = (await db.getMeta('lastBackup')) || 0;
   S.accMap = new Map(S.accounts.map(a => [a.id, a]));
   S.catMap = new Map(S.categories.map(c => [c.id, c]));
+  // 账户功能开关：第一次根据已有数据决定（有多个账户或转账记录才默认开启），之后以用户设置为准
+  let ua = await db.getMeta('useAccounts');
+  if (typeof ua !== 'boolean') {
+    ua = S.accounts.length > 1 || S.bills.some(b => b.type === 'transfer');
+    await db.setMeta('useAccounts', ua);
+  }
+  S.useAccounts = ua;
 }
 async function refresh() { await load(); render(); }
 
@@ -73,6 +80,8 @@ function balances() {
 }
 const catName = id => S.catMap.get(id)?.name || '未分类';
 const accName = id => S.accMap.get(id)?.name || '已删除账户';
+/** 账户功能关闭时，新账单自动记到这个默认账户（用户不需要关心） */
+const defaultAcc = () => (S.accounts.find(a => !a.archived) || S.accounts[0])?.id || 'acc_cash';
 
 // =============== 通用 UI：提示、弹窗、表单 ===============
 let toastTimer;
@@ -188,15 +197,19 @@ function bar(label, used, limit) {
   return h('div', { class: 'bar' }, h('div', { class: 'row' }, h('span', { text: label }), h('span', { class: over ? 'neg' : '', text: `${fmt(used)} / ${fmt(limit)}` })), h('div', { class: 'track' }, fill));
 }
 function billRow(b) {
-  const sub = b.type === 'transfer' ? `${accName(b.accountId)} → ${accName(b.toAccountId)}` : accName(b.accountId);
+  const sub = b.type === 'transfer' ? `${accName(b.accountId)} → ${accName(b.toAccountId)}` : S.useAccounts ? accName(b.accountId) : '';
+  // 点分类 → 只改分类；点金额 → 只改金额；点其他位置 → 完整编辑
+  const keyOf = fn => e => { if (e.key === 'Enter') fn(e); };
+  const tapCat = e => { if (S.selecting) return; e.stopPropagation(); quickCategory(b); };
+  const tapAmt = e => { if (S.selecting) return; e.stopPropagation(); quickAmount(b); };
   const d = new Date(b.time), picked = S.picked.has(b.id);
   const act = () => (S.selecting ? togglePick(b.id) : billForm(b));
   return h('div', { class: 'bill' + (picked ? ' picked' : ''), role: 'button', tabindex: 0, onclick: act, onkeydown: e => { if (e.key === 'Enter') act(); } },
     S.selecting ? h('span', { class: 'chk' + (picked ? ' on' : ''), text: picked ? '✓' : '' }) : null,
     h('div', { class: 'b-main' },
-      h('div', { class: 'b-title' }, b.type === 'transfer' ? '转账' : catName(b.categoryId), b.note ? h('span', { class: 'b-note', text: ' · ' + b.note }) : null, b.recurringId ? h('span', { class: 'b-note', text: ' 🔁' }) : null),
-      h('div', { class: 'b-sub', text: `${pad(d.getHours())}:${pad(d.getMinutes())} · ${sub}` })),
-    h('div', { class: 'amt ' + b.type, text: (b.type === 'in' ? '+' : b.type === 'out' ? '-' : '') + fmt(b.amount) }));
+      h('div', { class: 'b-title tap', role: S.selecting ? null : 'button', tabindex: S.selecting ? null : 0, onclick: tapCat, onkeydown: keyOf(tapCat) }, b.type === 'transfer' ? '转账' : catName(b.categoryId), b.note ? h('span', { class: 'b-note', text: ' · ' + b.note }) : null, b.recurringId ? h('span', { class: 'b-note', text: ' 🔁' }) : null),
+      h('div', { class: 'b-sub', text: `${pad(d.getHours())}:${pad(d.getMinutes())}${sub ? ' · ' + sub : ''}` })),
+    h('div', { class: 'amt tap ' + b.type, role: S.selecting ? null : 'button', tabindex: S.selecting ? null : 0, onclick: tapAmt, onkeydown: keyOf(tapAmt), text: (b.type === 'in' ? '+' : b.type === 'out' ? '-' : '') + fmt(b.amount) }));
 }
 function togglePick(id) { if (S.picked.has(id)) S.picked.delete(id); else S.picked.add(id); refill?.(); }
 
@@ -209,7 +222,7 @@ function vHome() {
     root.append(h('div', { class: 'banner' }, h('span', { text: S.lastBackup ? `已超过 ${Math.floor((Date.now() - S.lastBackup) / DAY)} 天没有导出备份` : '还没有导出过备份' }), h('button', { type: 'button', class: 'btn sm', text: '去备份', onclick: exportDialog })));
   const stat = (t, v, c) => h('div', { class: 'stat ' + c }, h('small', { text: t }), h('b', { text: v }));
   root.append(h('div', { class: 'stats' }, stat('收入', fmt(s.inc), 'in'), stat('支出', fmt(s.exp), 'out'), stat('结余', fmt(s.bal), 'bal')));
-  root.append(h('button', { type: 'button', class: 'card rowbtn', onclick: () => go('accounts') }, h('span', { class: 'grow' }, h('small', { text: '总资产' }), h('b', { class: 'big', text: fmt(net) })), h('span', { class: 'chev', text: '›' })));
+  if (S.useAccounts) root.append(h('button', { type: 'button', class: 'card rowbtn', onclick: () => go('accounts') }, h('span', { class: 'grow' }, h('small', { text: '总资产' }), h('b', { class: 'big', text: fmt(net) })), h('span', { class: 'chev', text: '›' })));
   const total = S.budgets._total || 0;
   const bc = h('section', { class: 'card' }, h('h3', { text: '预算' }));
   if (total) bc.append(bar('本月总预算', s.exp, total));
@@ -264,12 +277,13 @@ function vBills() {
     ]));
   }
   refill = fill;
-  root.append(h('div', { class: 'filters' },
+  if (!S.useAccounts) f.acc = '';
+  root.append(h('div', { class: 'filters' + (S.useAccounts ? '' : ' two') },
     sel([['all', '全部类型'], ['out', '支出'], ['in', '收入'], ['transfer', '转账']], f.type, v => { f.type = v; S.limit = 100; fill(); }),
     sel([['', '全部分类'], ...catOptions()], f.cat, v => { f.cat = v; S.limit = 100; fill(); }),
-    sel([['', '全部账户'], ...S.accounts.map(a => [a.id, a.name])], f.acc, v => { f.acc = v; S.limit = 100; fill(); }),
+    S.useAccounts ? sel([['', '全部账户'], ...S.accounts.map(a => [a.id, a.name])], f.acc, v => { f.acc = v; S.limit = 100; fill(); }) : null,
     h('input', { type: 'search', placeholder: '搜索备注 / 分类', value: f.q, oninput: e => { f.q = e.target.value; S.limit = 100; fill(); } })));
-  root.append(batch, listBox);
+  root.append(h('p', { class: 'hint', text: '点分类改分类 · 点金额改金额 · 点其他位置完整编辑' }), batch, listBox);
   fill();
   return root;
 }
@@ -289,29 +303,59 @@ async function undelete(ids) {
   await refresh(); toast('已恢复');
 }
 
+// =============== 快速修改：只改分类 / 只改金额 ===============
+function quickCategory(b) {
+  if (b.type === 'transfer') return billForm(b);
+  sheet('修改分类', close => h('div', { class: 'list' },
+    h('p', { class: 'hint', text: `${fmt(b.amount)}${b.note ? ' · ' + b.note : ''}　点一个分类即可` }),
+    h('div', { class: 'catgrid' }, S.categories.map(c => h('button', {
+      type: 'button', class: 'btn' + (c.id === b.categoryId ? ' pri' : ''), text: c.name,
+      onclick: async () => {
+        close();
+        if (c.id === b.categoryId) return;
+        const cur = await db.get('bills', b.id); if (!cur) return;
+        await db.put('bills', { ...cur, categoryId: c.id });
+        await refresh(); toast(`分类已改为「${c.name}」`);
+      },
+    })))));
+}
+async function quickAmount(b) {
+  const v = await form('修改金额', [
+    { key: 'amount', type: 'money', label: '金额', value: centsToStr(b.amount), required: true, validate: reqMoney },
+  ], { focus: 'amount', message: `${b.type === 'transfer' ? '转账' : catName(b.categoryId)}${b.note ? ' · ' + b.note : ''}` });
+  if (!v) return;
+  const c = parseMoney(v.amount);
+  if (c === b.amount) return;
+  const cur = await db.get('bills', b.id); if (!cur) return;
+  await db.put('bills', { ...cur, amount: c });
+  await refresh(); toast('金额已修改');
+}
+
 // =============== 记一笔 / 编辑 ===============
 const saveDraft = debounce(v => db.setMeta('draft', { type: v.type, amount: v.amount, categoryId: v.categoryId, accountId: v.accountId, toAccountId: v.toAccountId, note: v.note }), 400);
 
 async function billForm(b, preset = {}) {
   const isNew = !b;
   const accs = accOptions(b ? [b.accountId, b.toAccountId] : []);
-  if (!accs.length) { toast('请先在「账户」里添加或启用一个账户'); return; }
+  if (S.useAccounts && !accs.length) { toast('请先在「账户」里添加或启用一个账户'); return; }
   const draft = isNew ? await db.getMeta('draft') : null;
-  const first = accs[0][0];
+  const showAcc = S.useAccounts || b?.type === 'transfer';
+  const lastAcc = isNew ? await db.getMeta('lastAcc') : null;
+  const first = S.useAccounts ? (accs.find(([id]) => id === lastAcc) || accs[0])[0] : defaultAcc();
   let init = b
     ? { type: b.type, amount: centsToStr(b.amount), categoryId: b.categoryId || 'cat_other', accountId: b.accountId, toAccountId: b.toAccountId, time: toLocalInput(b.time), note: b.note }
     : { type: 'out', amount: '', categoryId: S.catMap.has('cat_food') ? 'cat_food' : S.categories[0]?.id, accountId: first, toAccountId: '', time: toLocalInput(Date.now()), note: '', ...(draft || {}), ...preset };
   if (!S.accMap.has(init.accountId)) init.accountId = first;
   if (!S.catMap.has(init.categoryId)) init.categoryId = 'cat_other';
   if (!S.accMap.has(init.toAccountId) || init.toAccountId === init.accountId) init.toAccountId = accs.find(([id]) => id !== init.accountId)?.[0] || '';
-  if (init.type === 'transfer' && accs.length < 2) init.type = 'out';
+  if (init.type === 'transfer' && !b && (!S.useAccounts || accs.length < 2)) init.type = 'out';
   const restored = isNew && draft && (draft.amount || draft.note);
   const v = await form(isNew ? '记一笔' : '编辑账单', [
-    { key: 'type', type: 'seg', value: init.type, options: [['out', '支出'], ['in', '收入'], ['transfer', '转账']] },
+    { key: 'type', type: 'seg', value: init.type, options: showAcc ? [['out', '支出'], ['in', '收入'], ['transfer', '转账']] : [['out', '支出'], ['in', '收入']] },
     { key: 'amount', type: 'money', label: '金额', value: init.amount, placeholder: '0.00', required: true, validate: reqMoney },
     { key: 'categoryId', type: 'select', label: '分类', value: init.categoryId, options: catOptions(), show: x => x.type !== 'transfer' },
-    { key: 'accountId', type: 'select', label: '账户', labelFn: x => (x.type === 'transfer' ? '转出账户' : '账户'), value: init.accountId, options: accs },
-    { key: 'toAccountId', type: 'select', label: '转入账户', value: init.toAccountId, options: accs, show: x => x.type === 'transfer', validate: (x, vv) => (!x ? '请选择转入账户' : x === vv.accountId ? '转入和转出账户不能相同' : '') },
+    { key: 'accountId', type: 'select', label: '账户', labelFn: x => (x.type === 'transfer' ? '转出账户' : '账户'), value: init.accountId, options: accs, show: () => showAcc },
+    { key: 'toAccountId', type: 'select', label: '转入账户', value: init.toAccountId, options: accs, show: x => showAcc && x.type === 'transfer', validate: (x, vv) => (!x ? '请选择转入账户' : x === vv.accountId ? '转入和转出账户不能相同' : '') },
     { key: 'time', type: 'datetime', label: '时间', value: init.time, required: true, validate: x => (fromLocalInput(x) == null ? '时间格式不对' : '') },
     { key: 'note', type: 'text', label: '备注（可选）', value: init.note, max: 200 },
   ], {
@@ -343,7 +387,7 @@ async function billForm(b, preset = {}) {
   };
   if (b?.recurringId) rec.recurringId = b.recurringId;
   await db.put('bills', rec);
-  if (isNew) { saveDraft.cancel?.(); await db.del('meta', 'draft'); }
+  if (isNew) { saveDraft.cancel?.(); await db.del('meta', 'draft'); if (S.useAccounts) await db.setMeta('lastAcc', v.accountId); }
   await refresh(); toast(isNew ? '已保存' : '已更新');
 }
 
@@ -453,6 +497,7 @@ function vMore() {
   const root = h('div', { class: 'page' });
   const sec = (t, ...kids) => root.append(h('section', { class: 'card' }, h('h3', { text: t }), ...kids));
   const total = S.budgets._total;
+  sec('功能', row('账户与转账', S.useAccounts ? '已开启 · 点击关闭' : '已关闭 · 点击开启（多个账户、转账、总资产）', toggleAccounts));
   sec('分类与预算',
     row('月度总预算', total ? fmt(total) : '未设置', totalBudgetForm),
     S.categories.map(c => row(c.name, S.budgets[c.id] ? '预算 ' + fmt(S.budgets[c.id]) : '', () => catForm(c))),
@@ -472,10 +517,16 @@ function vMore() {
     row('回收站', `${S.trash.length} 条 · 保留 30 天`, trashSheet),
     row('持久存储', S.persisted ? '已启用' : '未启用，点击申请（防止系统清理）', askPersist),
     row('清空全部数据', '会先创建快照', clearAll));
-  sec('关于', row('添加到 iPhone 主屏幕', '像 App 一样离线使用', installSheet),
+  sec('关于', row('检查更新', `当前 v${VERSION} · 点击检查`, () => checkUpdate(true)), row('添加到 iPhone 主屏幕', '像 App 一样离线使用', installSheet),
     h('p', { class: 'hint', text: `口袋记账 v${VERSION} · ${navigator.onLine ? '在线' : '离线'}` }),
     h('p', { class: 'hint', text: '免责声明：本软件免费提供，按现状使用，不保证没有错误。所有数据只保存在你自己的设备上，开发者无法查看，也无法找回。清除浏览器数据、更换或损坏设备都可能导致数据丢失，请定期导出备份；因数据丢失或软件错误造成的损失，由使用者自行承担。' }));
   return root;
+}
+async function toggleAccounts() {
+  const next = !S.useAccounts;
+  if (!next && !await confirmBox('关闭后，账户页、转账和账户选项都会隐藏，新账单自动记到默认账户。已有的账户和账单数据都保留，随时可以重新开启。', '关闭')) return;
+  await db.setMeta('useAccounts', next);
+  await refresh(); toast(next ? '已开启账户功能' : '已关闭账户功能');
 }
 async function totalBudgetForm() {
   const v = await form('月度总预算', [{ key: 'b', type: 'money', label: '金额（留空表示不设置）', value: S.budgets._total ? centsToStr(S.budgets._total) : '', validate: optMoney }]);
@@ -526,12 +577,12 @@ async function templateForm(t) {
 async function recurringForm(r) {
   const isNew = !r, locked = !!r && r.n > 0, today = ymd(new Date());
   const accs = accOptions(r ? [r.accountId] : []);
-  if (!accs.length) { toast('请先添加账户'); return; }
+  if (S.useAccounts && !accs.length) { toast('请先添加账户'); return; }
   const v = await form(isNew ? '新增周期账单' : '编辑周期账单', [
     { key: 'type', type: 'seg', value: r?.type || 'out', options: [['out', '支出'], ['in', '收入']] },
     { key: 'amount', type: 'money', label: '金额', value: r ? centsToStr(r.amount) : '', required: true, validate: reqMoney },
     { key: 'categoryId', type: 'select', label: '分类', value: r?.categoryId || 'cat_other', options: catOptions() },
-    { key: 'accountId', type: 'select', label: '账户', value: r?.accountId || accs[0][0], options: accs },
+    { key: 'accountId', type: 'select', label: '账户', value: r?.accountId || accs[0]?.[0] || defaultAcc(), options: accs, show: () => S.useAccounts },
     { key: 'freq', type: 'select', label: '频率', value: r?.freq || 'monthly', options: Object.entries(FREQ), disabled: locked },
     { key: 'start', type: 'date', label: '开始日期', value: r?.start || today, required: true, disabled: locked, validate: x => (validYmd(x) ? '' : '日期不正确') },
     { key: 'end', type: 'date', label: '结束日期（可选）', value: r?.end || '', validate: (x, vv) => (x && !validYmd(x) ? '日期不正确' : x && x < vv.start ? '结束日期不能早于开始日期' : '') },
@@ -670,8 +721,9 @@ async function askPersist() {
 
 function csvSheet() {
   const mk = async (kind) => {
-    const head = ['日期', '类型', '分类', '账户', '转入账户', '金额', '备注'];
-    const line = b => { const d = new Date(b.time); return [`${ymd(d)} ${pad(d.getHours())}:${pad(d.getMinutes())}`, TYPE_LABEL[b.type], b.type === 'transfer' ? '' : catName(b.categoryId), accName(b.accountId), b.type === 'transfer' ? accName(b.toAccountId) : '', centsToStr(b.amount), b.note || '']; };
+    const A = S.useAccounts || S.bills.some(x => x.type === 'transfer');
+    const head = ['日期', '类型', '分类', ...(A ? ['账户', '转入账户'] : []), '金额', '备注'];
+    const line = b => { const d = new Date(b.time); return [`${ymd(d)} ${pad(d.getHours())}:${pad(d.getMinutes())}`, TYPE_LABEL[b.type], b.type === 'transfer' ? '' : catName(b.categoryId), ...(A ? [accName(b.accountId), b.type === 'transfer' ? accName(b.toAccountId) : ''] : []), centsToStr(b.amount), b.note || '']; };
     let rows, name;
     if (kind === 'month') { rows = [head, ...monthBills(S.month).reverse().map(line)]; name = `bills-${S.month}`; }
     else if (kind === 'all') { rows = [head, ...[...S.bills].reverse().map(line)]; name = `bills-all-${ymd(new Date())}`; }
@@ -704,6 +756,8 @@ function installSheet() {
 // =============== 渲染与启动 ===============
 function render() {
   refill = null; post = [];
+  $('#tabs [data-v=accounts]').hidden = !S.useAccounts;
+  if (!S.useAccounts && S.view === 'accounts') S.view = 'home';
   document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('on', b.dataset.v === S.view));
   const y = window.scrollY, same = lastView === S.view;
   const node = ({ home: vHome, bills: vBills, stats: vStats, accounts: vAccounts, more: vMore })[S.view]();
@@ -736,6 +790,40 @@ async function seed() {
   if (migrated) setTimeout(() => toast(`已从旧版迁移 ${migrated} 笔账单`, { ms: 5000 }), 500);
 }
 
+// =============== 更新检查 ===============
+let swReg = null, lastCheck = 0, reloading = false;
+/** 检查 Service Worker 更新。manual=true 时给出明确提示；自动检查最多每 15 秒一次 */
+async function checkUpdate(manual) {
+  if (!swReg) { if (manual) toast('当前环境不支持离线更新'); return; }
+  if (!manual && Date.now() - lastCheck < 15000) return;
+  lastCheck = Date.now();
+  if (manual) toast('正在检查更新…', { ms: 15000 });
+  try {
+    await swReg.update();
+    const nw = swReg.installing || swReg.waiting;
+    if (nw) {
+      if (manual) {
+        toast('发现新版本，正在更新…', { ms: 20000 });
+        nw.addEventListener('statechange', () => { if (nw.state === 'redundant') toast('更新失败，请检查网络后重试', { ms: 5000 }); });
+      }
+    } else if (manual) toast(`已是最新版本 v${VERSION}`);
+  } catch { if (manual) toast('检查失败：连不上服务器，请检查网络后重试', { ms: 5000 }); }
+}
+/** 新版本接管后刷新页面。正在填写表单（有弹窗）时不打断：弹窗里放一条提示，关闭弹窗后自动刷新 */
+let dlgWatch = null;
+function applyUpdate() {
+  if (reloading) return;
+  const dlg = document.querySelector('dialog[open]');
+  if (!dlg) { reloading = true; setTimeout(() => location.reload(), 200); return; }
+  (dlg.querySelector('.sheet-body') || dlg).prepend(h('div', { class: 'banner' },
+    h('span', { text: '已有新版本，保存后会自动刷新' }),
+    h('button', { type: 'button', class: 'btn sm', text: '立即刷新', onclick: () => { reloading = true; location.reload(); } })));
+  dlgWatch ??= new MutationObserver(() => {
+    if (!reloading && !document.querySelector('dialog[open]')) { reloading = true; setTimeout(() => location.reload(), 1500); }
+  });
+  dlgWatch.observe(document.body, { childList: true });
+}
+
 async function init() {
   try { await db.open(); }
   catch (e) { $('#view').replaceChildren(h('div', { class: 'page' }, h('section', { class: 'card' }, h('h3', { text: '无法打开本地数据库' }), h('p', { class: 'hint', text: '可能是浏览器的隐私/无痕模式，或存储被禁用。请用正常模式的 Safari 打开。' + (e?.message ? `（${e.message}）` : '') })))); return; }
@@ -749,12 +837,13 @@ async function init() {
   $('#tabs').addEventListener('click', e => { const b = e.target.closest('button'); if (b) go(b.dataset.v); });
   $('#fab').addEventListener('click', () => billForm(null));
   db.bus.addEventListener('saved', () => { S.savedAt = Date.now(); paintStatus(); bc?.postMessage(1); });
-  addEventListener('online', paintStatus); addEventListener('offline', paintStatus);
+  addEventListener('online', () => { paintStatus(); checkUpdate(false); }); addEventListener('offline', paintStatus);
   addEventListener('resize', debounce(() => { if (S.view === 'stats') render(); }, 150));
   matchMedia('(prefers-color-scheme: dark)').addEventListener?.('change', () => { if (S.view === 'stats') render(); });
   addEventListener('unhandledrejection', e => toast('出错了：' + (e.reason?.message || e.reason), { ms: 5000 }));
   document.addEventListener('visibilitychange', async () => {
     if (document.visibilityState !== 'visible') return;
+    checkUpdate(false);
     await bk.dailySnapshot(); await load(); await runRecurring(); render();
   });
   let bc = null;
@@ -762,10 +851,9 @@ async function init() {
   paintStatus(); render();
 
   if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('./sw.js').then(reg => reg.addEventListener('updatefound', () => {
-      const nw = reg.installing;
-      nw?.addEventListener('statechange', () => { if (nw.state === 'installed' && navigator.serviceWorker.controller) toast('新版本已就绪，下次打开自动生效', { ms: 5000 }); });
-    })).catch(() => {});
+    let had = !!navigator.serviceWorker.controller; // 第一次安装接管页面不刷新，之后的"升级"才刷新
+    navigator.serviceWorker.addEventListener('controllerchange', () => { if (!had) { had = true; return; } applyUpdate(); });
+    navigator.serviceWorker.register('./sw.js', { updateViaCache: 'none' }).then(reg => { swReg = reg; checkUpdate(false); }).catch(() => {});
   }
 }
 init();
