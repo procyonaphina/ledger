@@ -447,7 +447,7 @@ async function billForm(b, preset = {}) {
       h('small', { class: 'hint', text: '常用备注 · 点击即可填入' }),
       h('div', { class: 'chips' }, S.notes.slice(0, 30).map(n => h('button', {
         type: 'button', class: 'chip', text: n.text, onclick: () => api.set({ note: n.text }),
-      }))) : null,
+      })))) : null,
     actions: [
       { text: '保存备注', run: async (vals, api) => {
         const text = String(vals.note || '').trim();
