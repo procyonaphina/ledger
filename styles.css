@@ -35,7 +35,7 @@ h3 { font-size: 1.02rem; }
 .neg { color: var(--out); }
 .grow { flex: 1; min-width: 0; }
 
-#tabs { position: fixed; left: 0; right: 0; bottom: 0; z-index: 10; display: grid; grid-template-columns: repeat(5, 1fr); background: var(--card); border-top: 1px solid var(--line); padding-bottom: env(safe-area-inset-bottom); }
+#tabs { position: fixed; left: 0; right: 0; bottom: 0; z-index: 10; display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; background: var(--card); border-top: 1px solid var(--line); padding-bottom: env(safe-area-inset-bottom); }
 #tabs button { height: var(--tabh); display: flex; flex-direction: column; align-items: center; justify-content: center; font-size: .72rem; color: var(--sub); gap: 1px; }
 #tabs button i { font-style: normal; font-size: 1.25rem; line-height: 1; }
 #tabs button.on { color: var(--pri); font-weight: 600; }
@@ -134,3 +134,11 @@ dialog.sheet::backdrop { background: rgba(0,0,0,.45); }
 #toast button { color: #8fb4ff; font-weight: 600; flex: none; }
 
 @media (min-width: 700px) { dialog.sheet { margin: auto; border-radius: 20px; } }
+
+/* v2.1：快速修改 / 账户开关 */
+.filters.two { grid-template-columns: 1fr 1fr; }
+.catgrid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.tap { cursor: pointer; }
+.b-title.tap { padding: 6px 0 2px; }
+.amt.tap { padding: 12px 6px; margin: -12px -6px; }
+.b-title.tap:active, .amt.tap:active { opacity: .55; }
