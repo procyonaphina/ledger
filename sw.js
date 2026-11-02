@@ -1,6 +1,6 @@
 // Service Worker：预缓存全部文件，之后完全离线可用。
 // 修改任何文件后，请把 VERSION 加一，旧缓存会在激活时清理。
-const VERSION = 'ledger-v2.4.0';
+const VERSION = 'ledger-v2.4.1';
 const ASSETS = [
   './', './index.html', './styles.css', './manifest.webmanifest',
   './js/app.js', './js/db.js', './js/backup.js', './js/charts.js', './js/util.js',
