@@ -7,7 +7,7 @@ import {
   daysIn, toLocalInput, fromLocalInput, validYmd, occurrence, csvCell, saveFile,
 } from './util.js';
 
-const VERSION = '2.0.0';
+const VERSION = '2.0.1';
 const ACC_TYPES = { cash: '现金', bank: '银行卡', alipay: '支付宝', wechat: '微信', credit: '信用卡', other: '其他' };
 const FREQ = { daily: '每天', weekly: '每周', monthly: '每月', yearly: '每年' };
 const TYPE_LABEL = { out: '支出', in: '收入', transfer: '转账' };
@@ -473,7 +473,8 @@ function vMore() {
     row('持久存储', S.persisted ? '已启用' : '未启用，点击申请（防止系统清理）', askPersist),
     row('清空全部数据', '会先创建快照', clearAll));
   sec('关于', row('添加到 iPhone 主屏幕', '像 App 一样离线使用', installSheet),
-    h('p', { class: 'hint', text: `口袋记账 v${VERSION} · ${navigator.onLine ? '在线' : '离线'}` }));
+    h('p', { class: 'hint', text: `口袋记账 v${VERSION} · ${navigator.onLine ? '在线' : '离线'}` }),
+    h('p', { class: 'hint', text: '免责声明：本软件免费提供，按现状使用，不保证没有错误。所有数据只保存在你自己的设备上，开发者无法查看，也无法找回。清除浏览器数据、更换或损坏设备都可能导致数据丢失，请定期导出备份；因数据丢失或软件错误造成的损失，由使用者自行承担。' }));
   return root;
 }
 async function totalBudgetForm() {
