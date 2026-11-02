@@ -7,7 +7,7 @@ import {
   daysIn, toLocalInput, fromLocalInput, validYmd, occurrence, csvCell, saveFile,
 } from './util.js';
 
-const VERSION = '2.2.0';
+const VERSION = '2.3.0';
 const ACC_TYPES = { cash: '现金', bank: '银行卡', alipay: '支付宝', wechat: '微信', credit: '信用卡', other: '其他' };
 const FREQ = { daily: '每天', weekly: '每周', monthly: '每月', yearly: '每年' };
 const TYPE_LABEL = { out: '支出', in: '收入', transfer: '转账' };
@@ -24,6 +24,7 @@ const S = {
 let post = [];      // 渲染后需要绘制的图表
 let refill = null;  // 账单页局部刷新函数
 let lastView = '';
+let activeSwipeClose = null;
 
 // =============== 数据加载 ===============
 async function load() {
@@ -116,9 +117,16 @@ function form(title, fields, opt = {}) {
     const say = (m, ok) => { err.textContent = m; err.classList.toggle('ok', !!ok); };
     const refreshF = () => { for (const [f, w, lab] of wraps) { w.hidden = f.show ? !f.show(vals) : false; if (f.labelFn && lab) lab.textContent = f.labelFn(vals); } };
     const change = k => { refreshF(); opt.onInput?.(vals, k); };
+    const optionWriters = {};
     const api = {
       close: finish, error: m => say(m, false), say,
       set(o) { for (const [k, v] of Object.entries(o)) { vals[k] = v; ctl[k]?.(v); } refreshF(); opt.onInput?.(vals); },
+      setOptions(k, options) {
+        optionWriters[k]?.(options);
+        if (options?.length && !options.some(([value]) => value === vals[k])) {
+          vals[k] = options[0][0]; ctl[k]?.(vals[k]); opt.onInput?.(vals, k);
+        }
+      },
     };
     const body = h('div', { class: 'fields' });
     for (const f of fields) {
@@ -131,9 +139,9 @@ function form(title, fields, opt = {}) {
         const bs = f.options.map(([v, t]) => h('button', { type: 'button', class: 'seg-b', text: t, onclick: () => { vals[f.key] = v; paint(v); change(f.key); } }));
         ctl[f.key] = paint; paint(vals[f.key]); node = h('div', { class: 'seg' }, bs);
       } else {
-        const isSel = f.type === 'select', isChk = f.type === 'checkbox';
+        const isSel = f.type === 'select' || f.type === 'selectAdd', isChk = f.type === 'checkbox';
         const el = isSel
-          ? h('select', {}, f.options.map(([v, t]) => h('option', { value: v, text: t })))
+          ? h('select', {}, (f.options || []).map(([v, t]) => h('option', { value: v, text: t })))
           : h('input', {
             type: { money: 'text', text: 'text', password: 'password', date: 'date', datetime: 'datetime-local', checkbox: 'checkbox' }[f.type] || 'text',
             inputmode: f.type === 'money' ? 'decimal' : null, maxlength: f.max, placeholder: f.placeholder,
@@ -142,9 +150,20 @@ function form(title, fields, opt = {}) {
         if (f.disabled) el.disabled = true;
         const write = v => { if (isChk) el.checked = !!v; else el.value = v; };
         write(vals[f.key]); ctl[f.key] = write; els[f.key] = el;
+        if (f.type === 'selectAdd') {
+          optionWriters[f.key] = options => {
+            el.replaceChildren(...(options || []).map(([v, t]) => h('option', { value: v, text: t })));
+            el.value = vals[f.key];
+          };
+        }
         const on = () => { vals[f.key] = isChk ? el.checked : el.value; change(f.key); };
         el.addEventListener('input', on); el.addEventListener('change', on);
-        node = isChk ? h('label', { class: 'check' }, el, h('span', { text: f.label })) : [lab, el];
+        if (isChk) node = h('label', { class: 'check' }, el, h('span', { text: f.label }));
+        else if (f.type === 'selectAdd') node = [lab, h('div', { class: 'select-add' }, el,
+          h('button', { type: 'button', class: 'btn sm', text: f.actionLabel || '＋ 新增', onclick: async () => {
+            try { await f.onAdd?.(api); } catch (e) { say(e?.message || '新增失败，请重试'); }
+          } }))];
+        else node = [lab, el];
       }
       const w = h('div', { class: 'field' }, node); wraps.push([f, w, lab]); body.append(w);
     }
@@ -196,7 +215,7 @@ function bar(label, used, limit) {
   fill.style.width = Math.min(100, used / limit * 100) + '%';
   return h('div', { class: 'bar' }, h('div', { class: 'row' }, h('span', { text: label }), h('span', { class: over ? 'neg' : '', text: `${fmt(used)} / ${fmt(limit)}` })), h('div', { class: 'track' }, fill));
 }
-function billRow(b) {
+function billRow(b, { swipeDelete = false } = {}) {
   const sub = b.type === 'transfer' ? `${accName(b.accountId)} → ${accName(b.toAccountId)}` : S.useAccounts ? accName(b.accountId) : '';
   // 点分类 → 只改分类；点金额 → 只改金额；点其他位置 → 完整编辑
   const keyOf = fn => e => { if (e.key === 'Enter') fn(e); };
@@ -204,12 +223,51 @@ function billRow(b) {
   const tapAmt = e => { if (S.selecting) return; e.stopPropagation(); quickAmount(b); };
   const d = new Date(b.time), picked = S.picked.has(b.id);
   const act = () => (S.selecting ? togglePick(b.id) : billForm(b));
-  return h('div', { class: 'bill' + (picked ? ' picked' : ''), role: 'button', tabindex: 0, onclick: act, onkeydown: e => { if (e.key === 'Enter') act(); } },
+  const row = h('div', { class: 'bill' + (picked ? ' picked' : ''), role: 'button', tabindex: 0, onclick: act, onkeydown: e => { if (e.key === 'Enter') act(); } },
     S.selecting ? h('span', { class: 'chk' + (picked ? ' on' : ''), text: picked ? '✓' : '' }) : null,
     h('div', { class: 'b-main' },
       h('div', { class: 'b-title tap', role: S.selecting ? null : 'button', tabindex: S.selecting ? null : 0, onclick: tapCat, onkeydown: keyOf(tapCat) }, b.type === 'transfer' ? '转账' : catName(b.categoryId), b.note ? h('span', { class: 'b-note', text: ' · ' + b.note }) : null, b.recurringId ? h('span', { class: 'b-note', text: ' 🔁' }) : null),
       h('div', { class: 'b-sub', text: `${pad(d.getHours())}:${pad(d.getMinutes())}${sub ? ' · ' + sub : ''}` })),
     h('div', { class: 'amt tap ' + b.type, role: S.selecting ? null : 'button', tabindex: S.selecting ? null : 0, onclick: tapAmt, onkeydown: keyOf(tapAmt), text: (b.type === 'in' ? '+' : b.type === 'out' ? '-' : '') + fmt(b.amount) }));
+  if (!swipeDelete || S.selecting) return row;
+
+  const content = h('div', { class: 'bill-swipe-content' }, row);
+  const remove = h('button', { type: 'button', class: 'bill-delete', 'aria-label': '删除这条账单', text: '删除', onclick: e => {
+    e.stopPropagation(); deleteBills([b.id]);
+  } });
+  const wrap = h('div', { class: 'bill-swipe' }, content, remove);
+  let start = null, opened = false, suppressClick = false;
+  const closeRow = () => {
+    if (!opened) return;
+    opened = false; content.classList.remove('open');
+    if (activeSwipeClose === closeRow) activeSwipeClose = null;
+  };
+  const openRow = () => {
+    if (activeSwipeClose && activeSwipeClose !== closeRow) activeSwipeClose();
+    opened = true; content.classList.add('open'); activeSwipeClose = closeRow;
+  };
+  wrap.addEventListener('pointerdown', e => {
+    if (e.target.closest('.bill-delete')) return;
+    start = { x: e.clientX, y: e.clientY };
+  });
+  wrap.addEventListener('pointerup', e => {
+    if (!start) return;
+    const dx = e.clientX - start.x, dy = e.clientY - start.y;
+    start = null;
+    if (Math.abs(dx) > 42 && Math.abs(dx) > Math.abs(dy) * 1.2) {
+      if (dx > 0) openRow(); else closeRow();
+      suppressClick = true;
+      setTimeout(() => { suppressClick = false; }, 500);
+    }
+  });
+  wrap.addEventListener('pointercancel', () => { start = null; });
+  wrap.addEventListener('click', e => {
+    if (suppressClick) { suppressClick = false; e.preventDefault(); e.stopPropagation(); return; }
+    if (opened && !e.target.closest('.bill-delete')) {
+      closeRow(); e.preventDefault(); e.stopPropagation();
+    }
+  }, true);
+  return wrap;
 }
 function togglePick(id) { if (S.picked.has(id)) S.picked.delete(id); else S.picked.add(id); refill?.(); }
 
@@ -260,7 +318,7 @@ function vBills() {
         kids.push(head);
       }
       if (b.type === 'out') daySum += b.amount;
-      kids.push(billRow(b));
+      kids.push(billRow(b, { swipeDelete: true }));
     }
     closeDay();
     if (!list.length) kids.push(h('p', { class: 'hint center', text: '没有符合条件的账单' }));
@@ -283,14 +341,13 @@ function vBills() {
     sel([['', '全部分类'], ...catOptions()], f.cat, v => { f.cat = v; S.limit = 100; fill(); }),
     S.useAccounts ? sel([['', '全部账户'], ...S.accounts.map(a => [a.id, a.name])], f.acc, v => { f.acc = v; S.limit = 100; fill(); }) : null,
     h('input', { type: 'search', placeholder: '搜索备注 / 分类', value: f.q, oninput: e => { f.q = e.target.value; S.limit = 100; fill(); } })));
-  root.append(h('p', { class: 'hint', text: '点分类改分类 · 点金额改金额 · 点其他位置完整编辑' }), batch, listBox);
+  root.append(h('p', { class: 'hint', text: '右滑账单可删除（支持撤销）· 点分类改分类 · 点金额改金额 · 点其他位置完整编辑' }), batch, listBox);
   fill();
   return root;
 }
 async function batchDelete() {
   const ids = [...S.picked];
   if (!ids.length) return;
-  if (!await confirmBox(`删除选中的 ${ids.length} 条账单？删除后可在 8 秒内撤销，也可在回收站找回。`, '删除', true)) return;
   S.picked.clear(); S.selecting = false;
   await deleteBills(ids);
 }
@@ -317,7 +374,14 @@ function quickCategory(b) {
         await db.put('bills', { ...cur, categoryId: c.id });
         await refresh(); toast(`分类已改为「${c.name}」`);
       },
-    })))));
+    }))),
+    h('button', { type: 'button', class: 'btn block', text: '＋ 新增分类', onclick: async () => {
+      const id = await addCategoryQuick(); if (!id) return;
+      close();
+      const cur = await db.get('bills', b.id); if (!cur) return;
+      await db.put('bills', { ...cur, categoryId: id });
+      await refresh(); toast(`分类已改为「${catName(id)}」`);
+    } })));
 }
 async function quickAmount(b) {
   const v = await form('修改金额', [
@@ -353,7 +417,12 @@ async function billForm(b, preset = {}) {
   const v = await form(isNew ? '记一笔' : '编辑账单', [
     { key: 'type', type: 'seg', value: init.type, options: showAcc ? [['out', '支出'], ['in', '收入'], ['transfer', '转账']] : [['out', '支出'], ['in', '收入']] },
     { key: 'amount', type: 'money', label: '金额', value: init.amount, placeholder: '0.00', required: true, validate: reqMoney },
-    { key: 'categoryId', type: 'select', label: '分类', value: init.categoryId, options: catOptions(), show: x => x.type !== 'transfer' },
+    { key: 'categoryId', type: 'selectAdd', label: '分类', value: init.categoryId, options: catOptions(), show: x => x.type !== 'transfer',
+      onAdd: async api => {
+        const id = await addCategoryQuick();
+        if (!id) return;
+        api.setOptions('categoryId', catOptions()); api.set({ categoryId: id });
+      } },
     { key: 'accountId', type: 'select', label: '账户', labelFn: x => (x.type === 'transfer' ? '转出账户' : '账户'), value: init.accountId, options: accs, show: () => showAcc },
     { key: 'toAccountId', type: 'select', label: '转入账户', value: init.toAccountId, options: accs, show: x => showAcc && x.type === 'transfer', validate: (x, vv) => (!x ? '请选择转入账户' : x === vv.accountId ? '转入和转出账户不能相同' : '') },
     { key: 'time', type: 'datetime', label: '时间', value: init.time, required: true, validate: x => (fromLocalInput(x) == null ? '时间格式不对' : '') },
@@ -500,8 +569,11 @@ function vMore() {
   sec('功能', row('账户与转账', S.useAccounts ? '已开启 · 点击关闭' : '已关闭 · 点击开启（多个账户、转账、总资产）', toggleAccounts));
   sec('分类与预算',
     row('月度总预算', total ? fmt(total) : '未设置', totalBudgetForm),
-    S.categories.map(c => row(c.name, S.budgets[c.id] ? '预算 ' + fmt(S.budgets[c.id]) : '', () => catForm(c))),
-    row('＋ 新增分类', '', () => catForm(null)));
+    h('details', { class: 'category-details' },
+      h('summary', { text: `分类管理（${S.categories.length}）` }),
+      h('div', { class: 'category-details-list' },
+        S.categories.map(c => row(c.name, S.budgets[c.id] ? '预算 ' + fmt(S.budgets[c.id]) : '', () => catForm(c))),
+        row('＋ 新增分类', '', () => catForm(null)))));
   sec('周期账单',
     S.recurring.map(r => row(`${r.type === 'in' ? '+' : '-'}${fmt(r.amount)} · ${catName(r.categoryId)}`, `${FREQ[r.freq]} · 从 ${r.start}${r.end ? ' 到 ' + r.end : ''}${r.active ? '' : ' · 已暂停'}`, () => recurringForm(r))),
     row('＋ 新增周期账单', '工资、房租、订阅等，打开应用时自动入账', () => recurringForm(null)));
@@ -535,6 +607,20 @@ async function totalBudgetForm() {
   if (c) await db.put('budgets', { key: '_total', cents: c }); else await db.del('budgets', '_total');
   await refresh();
 }
+async function addCategoryQuick() {
+  const v = await form('新增分类', [{
+    key: 'name', type: 'text', label: '分类名称', value: '', required: true, max: 30,
+    validate: value => S.categories.some(c => c.name.trim().toLowerCase() === value.trim().toLowerCase()) ? '这个分类已经存在' : '',
+  }]);
+  if (!v) return null;
+  const name = v.name.trim();
+  const id = uid();
+  await db.put('categories', { id, name, o: Date.now() });
+  await load();
+  toast(`已新增分类「${name}」`);
+  return id;
+}
+
 async function catForm(c) {
   const isNew = !c;
   const v = await form(isNew ? '新增分类' : '编辑分类', [
@@ -581,7 +667,8 @@ async function recurringForm(r) {
   const v = await form(isNew ? '新增周期账单' : '编辑周期账单', [
     { key: 'type', type: 'seg', value: r?.type || 'out', options: [['out', '支出'], ['in', '收入']] },
     { key: 'amount', type: 'money', label: '金额', value: r ? centsToStr(r.amount) : '', required: true, validate: reqMoney },
-    { key: 'categoryId', type: 'select', label: '分类', value: r?.categoryId || 'cat_other', options: catOptions() },
+    { key: 'categoryId', type: 'selectAdd', label: '分类', value: r?.categoryId || 'cat_other', options: catOptions(),
+      onAdd: async api => { const id = await addCategoryQuick(); if (!id) return; api.setOptions('categoryId', catOptions()); api.set({ categoryId: id }); } },
     { key: 'accountId', type: 'select', label: '账户', value: r?.accountId || accs[0]?.[0] || defaultAcc(), options: accs, show: () => S.useAccounts },
     { key: 'freq', type: 'select', label: '频率', value: r?.freq || 'monthly', options: Object.entries(FREQ), disabled: locked },
     { key: 'start', type: 'date', label: '开始日期', value: r?.start || today, required: true, disabled: locked, validate: x => (validYmd(x) ? '' : '日期不正确') },
